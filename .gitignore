@@ -1,0 +1,26 @@
+# --- ROS2 / colcon build artifacts ---
+build/
+install/
+log/
+
+# --- IDE ---
+.vscode/
+*.swp
+*~
+
+# --- Python / misc ---
+__pycache__/
+*.pyc
+
+# --- Arena SDK (do NOT commit) ---
+ArenaViewMP_v_*/          # e.g. ArenaViewMP_v_1.0.0.10_Linux_x64/
+ArenaSDK_Linux_x64/
+ArenaSDK_*/
+**/ArenaSDK_*/
+**/ArenaViewMP_v_*/
+
+# (선택) SDK 관련 압축/설치 파일이 같이 있으면
+*.run
+*.deb
+*.tar.gz
+*.zip
