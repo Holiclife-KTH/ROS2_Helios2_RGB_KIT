@@ -14,7 +14,7 @@ find_package(OpenCV REQUIRED)
 find_package(pcl_conversions REQUIRED)
 
 # Arena SDK 경로 (사용자 지정 경로 반영)
-set(ARENA_SDK_PATH "/home/irol/workspace/ros2_helios2_rgb_kit/ArenaViewMP_v_1.0.0.10_Linux_x64/ArenaSDK_Linux_x64")
+set(ARENA_SDK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/ArenaViewMP_v_1.0.0.10_Linux_x64/ArenaSDK_Linux_x64")
 set(ARENA_LIB_DIR "${ARENA_SDK_PATH}/lib64")
 set(GENICAM_LIB_DIR "${ARENA_SDK_PATH}/GenICam/library/lib/Linux64_x64")
 
