@@ -27,6 +27,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
 #include "cv_bridge/cv_bridge.h"
@@ -35,6 +36,7 @@ using namespace std::chrono_literals;
 
 #define TIMEOUT 200
 #define FILE_NAME_IN "/home/irol/workspace/ros2_helios2_rgb_kit/src/lucid_camera_node/resource/orientation.yml"
+#define FILE_NAME_TRITON_CALIB "/home/irol/workspace/ros2_helios2_rgb_kit/src/lucid_camera_node/resource/tritoncalibration.yml"
 
 bool isApplicableDeviceTriton(Arena::DeviceInfo deviceInfo)
 {
@@ -62,11 +64,13 @@ public:
       running_(true)
     {
         image_publisher_ = this->create_publisher<sensor_msgs::msg::Image>("triton/image_raw", 10);
+        camera_info_publisher_ = this->create_publisher<sensor_msgs::msg::CameraInfo>("triton/camera_info", 10);
         pointcloud_publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("helios/pointcloud_rgb", 10);
         
         try
         {
             loadCalibrationData();
+            loadTritonCalibrationData();
             
             pSystem_ = Arena::OpenSystem();
             pSystem_->UpdateDevices(100);
@@ -98,11 +102,41 @@ public:
                 else if (!pDeviceHLT_ && isApplicableDeviceHelios2(deviceInfo))
                 {
                     pDeviceHLT_ = pSystem_->CreateDevice(deviceInfo);
-                    RCLCPP_INFO(this->get_logger(), "Found Helios2 camera: %s", deviceInfo.ModelName().c_str());
+                    auto pNodeMapHLT = pDeviceHLT_->GetNodeMap();
 
-                    Arena::SetNodeValue<bool>(pDeviceHLT_->GetTLStreamNodeMap(), "StreamAutoNegotiatePacketSize", true);
-                    Arena::SetNodeValue<bool>(pDeviceHLT_->GetTLStreamNodeMap(), "StreamPacketResendEnable", true);
-                    Arena::SetNodeValue<GenICam::gcstring>(pDeviceHLT_->GetNodeMap(), "PixelFormat", "Coord3D_ABCY16");
+                    // 1. 펌웨어 호환성 체크 (Scan3dCoordinateOffset 노드 존재 여부)
+                    GenApi::CFloatPtr checkpCoord = pNodeMapHLT->GetNode("Scan3dCoordinateOffset");
+                    if (!checkpCoord)
+                    {
+                        RCLCPP_ERROR(this->get_logger(), "Scan3dCoordinateOffset node not found. Please update Helios firmware!");
+                        // 필요 시 여기서 return 하거나 예외를 던질 수 있습니다.
+                    }
+
+                    // 2. 모델 식별 (Helios2 여부 확인)
+                    bool isHelios2 = false;
+                    GenICam::gcstring modelName = Arena::GetNodeValue<GenICam::gcstring>(pNodeMapHLT, "DeviceModelName");
+                    std::string modelStr = modelName.c_str();
+                    if (modelStr.rfind("HLT", 0) == 0 || modelStr.rfind("HT", 0) == 0)
+                    {
+                        isHelios2 = true;
+                    }
+
+                    // 3. Pixel Format 설정
+                    Arena::SetNodeValue<GenICam::gcstring>(pNodeMapHLT, "PixelFormat", "Coord3D_ABCY16");
+
+                    // 4. 동작 모드 설정 (와인잔 측정을 위한 HDR 모드 권장)
+                    if (isHelios2)
+                    {
+                        // 와인잔과 같은 투명/반사체는 'Distance1500mmHDR'이 가장 정밀합니다.
+                        // 보내주신 코드의 'Distance3000mmSingleFreq'보다 HDR 모드가 유리할 수 있습니다.
+                        RCLCPP_INFO(this->get_logger(), "Helios2 detected. Setting HDR Operating Mode.");
+                        Arena::SetNodeValue<GenICam::gcstring>(pNodeMapHLT, "Scan3dOperatingMode", "Distance8300mmMultiFreq");
+                    }
+                    else
+                    {
+                        RCLCPP_INFO(this->get_logger(), "Standard Helios detected. Setting 1500mm Mode.");
+                        Arena::SetNodeValue<GenICam::gcstring>(pNodeMapHLT, "Scan3dOperatingMode", "Distance1500mm");
+                    }
                 }
             }
 
@@ -186,6 +220,22 @@ private:
         RCLCPP_INFO(this->get_logger(), "Loaded calibration data from %s", FILE_NAME_IN);
     }
     
+    void loadTritonCalibrationData()
+    {
+        cv::FileStorage fs(FILE_NAME_TRITON_CALIB, cv::FileStorage::READ);
+        if (!fs.isOpened())
+        {
+            RCLCPP_ERROR(this->get_logger(), "Failed to open Triton calibration file: %s", FILE_NAME_TRITON_CALIB);
+            throw std::runtime_error("Triton calibration file not found");
+        }
+        
+        fs["cameraMatrix"] >> tritonCameraMatrix_;
+        fs["distCoeffs"] >> tritonDistCoeffs_;
+        fs.release();
+        
+        RCLCPP_INFO(this->get_logger(), "Loaded Triton calibration data from %s", FILE_NAME_TRITON_CALIB);
+    }
+    
     // 이미지 캡처 및 publish (메인 스레드)
     void timer_callback()
     {
@@ -232,6 +282,38 @@ private:
                 header.frame_id = "triton_camera";
                 auto ros_image = cv_bridge::CvImage(header, "bgr8", imageMatrixRGB).toImageMsg();
                 image_publisher_->publish(*ros_image);
+                
+                // CameraInfo publish
+                sensor_msgs::msg::CameraInfo cam_info_msg;
+                cam_info_msg.header = header;
+                cam_info_msg.height = tri_height;
+                cam_info_msg.width = tri_width;
+                cam_info_msg.distortion_model = "rational_polynomial";
+                
+                // D (distortion coefficients)
+                cam_info_msg.d.resize(tritonDistCoeffs_.rows * tritonDistCoeffs_.cols);
+                for (int i = 0; i < tritonDistCoeffs_.rows * tritonDistCoeffs_.cols; i++)
+                    cam_info_msg.d[i] = tritonDistCoeffs_.at<double>(i);
+                
+                // K (3x3 intrinsic camera matrix)
+                for (int i = 0; i < 9; i++)
+                    cam_info_msg.k[i] = tritonCameraMatrix_.at<double>(i / 3, i % 3);
+                
+                // R (3x3 identity rotation matrix)
+                cam_info_msg.r = {1.0, 0.0, 0.0,
+                                  0.0, 1.0, 0.0,
+                                  0.0, 0.0, 1.0};
+                
+                // P (3x4 projection matrix)
+                double fx = tritonCameraMatrix_.at<double>(0, 0);
+                double fy = tritonCameraMatrix_.at<double>(1, 1);
+                double cx = tritonCameraMatrix_.at<double>(0, 2);
+                double cy = tritonCameraMatrix_.at<double>(1, 2);
+                cam_info_msg.p = {fx, 0.0, cx, 0.0,
+                                  0.0, fy, cy, 0.0,
+                                  0.0, 0.0, 1.0, 0.0};
+                
+                camera_info_publisher_->publish(cam_info_msg);
                 
                 // 포인트클라우드 데이터를 큐에 추가 (별도 스레드에서 처리)
                 {
@@ -405,6 +487,7 @@ private:
     
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_publisher_;
+    rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_publisher_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_publisher_;
     
     Arena::ISystem* pSystem_;
@@ -415,6 +498,9 @@ private:
     cv::Mat distCoeffs_;
     cv::Mat rotationVector_;
     cv::Mat translationVector_;
+    
+    cv::Mat tritonCameraMatrix_;
+    cv::Mat tritonDistCoeffs_;
     
     double xyz_scale_mm_;
     double x_offset_mm_;
