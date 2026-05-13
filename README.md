@@ -26,3 +26,7 @@ Before running the driver, you must calibrate the cameras to obtain the Intrinsi
 Lens Calibration: Use the camera_calibration ROS 2 package or Arena SDK tools to get the Triton camera's calibration file.
 
 Bridge Configuration: Use the Arena SDK to verify that the Triton and Helios cameras are correctly identified and accessible on the network.
+
+## Example
+<img width="2485" height="1346" alt="image (2)" src="https://github.com/user-attachments/assets/63ee7e69-6f16-42d0-8b9b-1d689a754ded" />
+
